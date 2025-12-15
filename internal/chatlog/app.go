@@ -3,7 +3,6 @@ package chatlog
 import (
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -225,29 +224,25 @@ func (a *App) inputCapture(event *tcell.EventKey) *tcell.EventKey {
 func (a *App) initMenu() {
 	getDataKey := &menu.Item{
 		Index:       2,
-		Name:        "获取密钥",
-		Description: "从进程获取数据密钥 & 图片密钥",
+		Name:        "获取图片密钥",
+		Description: "扫描内存获取图片密钥(需微信V4)",
 		Selected: func(i *menu.Item) {
 			modal := tview.NewModal()
-			if runtime.GOOS == "darwin" {
-				modal.SetText("获取密钥中...\n预计需要 20 秒左右的时间，期间微信会卡住，请耐心等待")
-			} else {
-				modal.SetText("获取密钥中...")
-			}
+			modal.SetText("正在扫描内存获取图片密钥...\n请确保微信已登录并浏览过图片")
 			a.mainPages.AddPage("modal", modal, true, true)
 			a.SetFocus(modal)
 
 			go func() {
-				err := a.m.GetDataKey()
+				err := a.m.GetImageKey()
 
 				// 在主线程中更新UI
 				a.QueueUpdateDraw(func() {
 					if err != nil {
 						// 解密失败
-						modal.SetText("获取密钥失败: " + err.Error())
+						modal.SetText("获取图片密钥失败: " + err.Error())
 					} else {
 						// 解密成功
-						modal.SetText("获取密钥成功")
+						modal.SetText("获取图片密钥成功")
 					}
 
 					// 添加确认按钮

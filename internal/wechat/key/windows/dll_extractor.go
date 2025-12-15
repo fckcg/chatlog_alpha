@@ -93,28 +93,123 @@ func (e *DLLExtractor) Extract(ctx context.Context, proc *model.Process) (string
 	}
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// 清理之前的初始化（如果存在）
-	if e.initialized {
-		e.cleanup()
-	}
-
 	// 初始化DLL
+	// 注意：初始化必须在锁内完成
 	if err := e.initialize(proc.PID); err != nil {
+		e.mu.Unlock()
 		return "", "", err
 	}
-
-	// 确保无论成功失败都清理
-	// 注意：这里使用defer确保cleanup在函数返回前执行
-	defer func() {
+	// DLL相关的清理函数
+	cleanupDLL := func() {
 		if e.initialized {
 			e.cleanup()
 		}
+	}
+	e.mu.Unlock() // 初始化完成后解锁，允许并行执行（注意pollKeys内部需要处理并发访问，或者我们确保它独占DLL资源）
+	// 查看pollKeys实现，它只访问e.lastKey和DLL函数，且DLLExtractor是单例/单次使用的，所以这里解锁只要保证没有其他Extract调用即可。
+	// 但为了安全，我们在pollKeys的goroutine里重新加锁？不，pollKeys是长时间运行的。
+	// 实际上DLLExtractor的设计似乎假设是单线程使用的。
+	// 为了安全起见，我们在DLL goroutine里持有锁。
+
+	// 准备并行执行
+	var (
+		finalDataKey string
+		finalImgKey  string
+		keyMu        sync.Mutex // 保护结果更新
+		wg           sync.WaitGroup
+	)
+
+	// 创建可取消的上下文
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 辅助函数：更新密钥并检查是否完成
+	updateKeys := func(dk, ik, source string) {
+		keyMu.Lock()
+		defer keyMu.Unlock()
+
+		updated := false
+		if dk != "" && finalDataKey == "" {
+			finalDataKey = dk
+			updated = true
+			log.Info().Msgf("通过 %s 获取到数据库密钥", source)
+		}
+		if ik != "" && finalImgKey == "" {
+			finalImgKey = ik
+			updated = true
+			log.Info().Msgf("通过 %s 获取到图片密钥", source)
+		}
+
+		// 检查是否所有需要的密钥都已获取
+		// 对于V4：需要DataKey + ImgKey
+		// 对于V3：只需要DataKey
+		if updated {
+			if proc.Version == 4 {
+				if finalDataKey != "" && finalImgKey != "" {
+					log.Info().Msg("已获取所有所需密钥，提前结束轮询")
+					cancel()
+				}
+			} else {
+				if finalDataKey != "" {
+					log.Info().Msg("已获取所有所需密钥，提前结束轮询")
+					cancel()
+				}
+			}
+		}
+	}
+
+	// 任务 1: DLL 轮询 (运行在Goroutine中)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		
+		// DLL操作需要持有锁以保护状态
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		defer cleanupDLL() // 确保退出时清理
+
+		// 执行轮询，传入回调以便立即报告发现的密钥
+		dk, ik, _ := e.pollKeys(ctx, proc.Version, func(d, i string) {
+			updateKeys(d, i, "DLL")
+		})
+		
+		// 轮询结束后的最终更新（防止遗漏，虽然回调应该覆盖了大部分情况）
+		if dk != "" || ik != "" {
+			updateKeys(dk, ik, "DLL")
+		}
 	}()
 
-	// 轮询获取密钥
-	return e.pollKeys(ctx, proc.Version)
+	// 任务 2: 原生内存扫描 (仅V4版本，运行在Goroutine中)
+	if proc.Version == 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			
+			log.Info().Msg("并行启动原生内存扫描(Dart模式)...")
+			
+			v4 := NewV4Extractor()
+			v4.SetValidate(e.validator)
+			
+			// 执行扫描
+			dk, ik, _ := v4.Extract(ctx, proc)
+			
+			// 更新结果
+			if dk != "" || ik != "" {
+				updateKeys(dk, ik, "内存扫描")
+			}
+		}()
+	}
+
+	// 等待所有任务完成（或超时/被取消）
+	wg.Wait()
+
+	// 只要获取到了任意密钥，就算成功
+	var err error
+	if finalDataKey == "" && finalImgKey == "" {
+		err = fmt.Errorf("未获取到有效密钥")
+	}
+
+	return finalDataKey, finalImgKey, err
 }
 
 // initialize 初始化DLL Hook
@@ -153,7 +248,7 @@ func (e *DLLExtractor) initialize(pid uint32) error {
 }
 
 // pollKeys 轮询获取密钥
-func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, string, error) {
+func (e *DLLExtractor) pollKeys(ctx context.Context, version int, onKeyFound func(dataKey, imgKey string)) (string, string, error) {
 	if !e.initialized {
 		return "", "", fmt.Errorf("DLL未初始化")
 	}
@@ -170,7 +265,7 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 	for {
 		select {
 		case <-ctx.Done():
-			return "", "", ctx.Err()
+			return dataKey, imgKey, ctx.Err()
 		case <-timeout:
 			// 检查是否获取到了数据密钥
 			if dataKey != "" {
@@ -239,10 +334,13 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 					continue
 				}
 
+				foundNew := false
+
 				// 检查是否是数据库密钥
 				if e.validator != nil && e.validator.Validate(keyBytes) {
 					if dataKey == "" {
 						dataKey = key
+						foundNew = true
 						msg := "通过DLL找到数据库密钥: " + key
 						log.Info().Msg(msg)
 						// 记录到日志文件
@@ -257,6 +355,7 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 					// 图片密钥通常是16字节（32字符HEX字符串）
 					if len(key) == 64 && dataKey == "" {
 						dataKey = key
+						foundNew = true
 						msg := "通过DLL找到数据库密钥（无验证）: " + key
 						log.Info().Msg(msg)
 						// 记录到日志文件
@@ -266,6 +365,7 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 						}
 					} else if len(key) == 32 && imgKey == "" {
 						imgKey = key
+						foundNew = true
 						msg := "通过DLL找到图片密钥（无验证）: " + imgKey
 						log.Info().Msg(msg)
 						// 记录到日志文件
@@ -280,6 +380,7 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 				if e.validator != nil && e.validator.ValidateImgKey(keyBytes) {
 					if imgKey == "" {
 						imgKey = key[:32] // 16字节的HEX字符串是32个字符
+						foundNew = true
 						msg := "通过DLL找到图片密钥: " + imgKey
 						log.Info().Msg(msg)
 						// 记录到日志文件
@@ -288,6 +389,11 @@ func (e *DLLExtractor) pollKeys(ctx context.Context, version int) (string, strin
 							e.logger.LogInfo(msg)
 						}
 					}
+				}
+
+				// 如果发现了新密钥，立即通过回调报告
+				if foundNew && onKeyFound != nil {
+					onKeyFound(dataKey, imgKey)
 				}
 
 				// 如果两个密钥都找到了，返回

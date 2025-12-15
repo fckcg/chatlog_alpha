@@ -179,6 +179,18 @@ func (m *Manager) GetDataKey() error {
 	return nil
 }
 
+func (m *Manager) GetImageKey() error {
+	if m.ctx.Current == nil {
+		return fmt.Errorf("未选择任何账号")
+	}
+	if _, err := m.wechat.GetImageKey(m.ctx.Current); err != nil {
+		return err
+	}
+	m.ctx.Refresh()
+	m.ctx.UpdateConfig()
+	return nil
+}
+
 func (m *Manager) RestartAndGetDataKey() error {
 	if m.ctx.Current == nil {
 		return fmt.Errorf("未选择任何账号")
