@@ -517,53 +517,6 @@ func (a *App) initMenu() {
 		Selected:    a.selectAccountSelected,
 	}
 
-	mcpSubscriptions := &menu.Item{
-		Index:       9,
-		Name:        "查看 MCP 订阅",
-		Description: "查看当前正在订阅的实时消息流及推送状态",
-		Selected: func(i *menu.Item) {
-			subs := a.m.GetMCPSubscriptions()
-			lastPushTime, lastPushTalker := a.m.GetMCPStatus()
-			status := "[red]未启动[white]"
-			if a.ctx.HTTPEnabled {
-				status = "[green]运行中[white]"
-			}
-
-			text := fmt.Sprintf("推送服务状态: %s\n", status)
-			text += fmt.Sprintf("推送服务地址: [cyan]%s[white]\n", a.ctx.HTTPAddr)
-			if !lastPushTime.IsZero() {
-				text += fmt.Sprintf("最近推送时间: [green]%s[white] (%s)\n", lastPushTime.Format("15:04:05"), lastPushTalker)
-			} else {
-				text += "最近推送时间: [gray]暂无推送[white]\n"
-			}
-			text += "[yellow]订阅信息已持久化保存到本地[white]\n\n"
-
-			if len(subs) == 0 {
-				text += "当前无活跃订阅。"
-			} else {
-				text += "活跃订阅列表:\n"
-				for _, sub := range subs {
-					statusStr := "[gray]等待中[white]"
-					if sub.LastStatus == "Success" {
-						statusStr = "[green]成功[white]"
-					} else if sub.LastStatus == "Failed" || sub.LastStatus == "Error" {
-						statusStr = fmt.Sprintf("[red]失败: %s[white]", sub.LastError)
-					}
-					text += fmt.Sprintf("- %s\n  状态: %s\n  推送地址: %s\n  订阅时间: %s\n", sub.Talker, statusStr, sub.WebhookURL, sub.LastTime.Format("2006-01-02 15:04:05"))
-				}
-			}
-
-			modal := tview.NewModal().
-				SetText(text).
-				AddButtons([]string{"返回"}).
-				SetDoneFunc(func(buttonIndex int, buttonLabel string) {
-					a.mainPages.RemovePage("modal")
-				})
-			a.mainPages.AddPage("modal", modal, true, true)
-			a.SetFocus(modal)
-		},
-	}
-
 	a.menu.AddItem(getDataKey)
 	a.menu.AddItem(restartAndGetDataKey)
 	a.menu.AddItem(decryptData)
@@ -571,10 +524,9 @@ func (a *App) initMenu() {
 	a.menu.AddItem(autoDecrypt)
 	a.menu.AddItem(setting)
 	a.menu.AddItem(selectAccount)
-	a.menu.AddItem(mcpSubscriptions)
 
 	a.menu.AddItem(&menu.Item{
-		Index:       10,
+		Index:       9,
 		Name:        "退出",
 		Description: "退出程序",
 		Selected: func(i *menu.Item) {

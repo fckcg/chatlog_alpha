@@ -2,8 +2,6 @@ package dbm
 
 import (
 	"database/sql"
-	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"

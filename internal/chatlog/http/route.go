@@ -201,6 +201,11 @@ func (s *Service) handleChatlog(c *gin.Context) {
 		}
 	case "json":
 		// json
+		for _, m := range messages {
+			if m.Content == "" {
+				m.Content = m.PlainTextContent()
+			}
+		}
 		c.JSON(http.StatusOK, messages)
 	default:
 		// plain text
@@ -210,7 +215,8 @@ func (s *Service) handleChatlog(c *gin.Context) {
 		c.Writer.Flush()
 
 		for _, m := range messages {
-			c.Writer.WriteString(m.PlainText(strings.Contains(q.Talker, ","), util.PerfectTimeFormat(start, end), c.Request.Host))
+			// format=text 时，不传入 host，只显示 [图片] 等标签，保持简洁
+			c.Writer.WriteString(m.PlainText(strings.Contains(q.Talker, ","), util.PerfectTimeFormat(start, end), ""))
 			c.Writer.WriteString("\n")
 			c.Writer.Flush()
 		}

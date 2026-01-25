@@ -28,7 +28,7 @@ import (
 
 func (s *Service) initMCPServer() {
 	s.mcpServer = server.NewMCPServer(conf.AppName, version.Version,
-		server.WithResourceCapabilities(true, true),
+		server.WithResourceCapabilities(false, false),
 		server.WithToolCapabilities(true),
 		server.WithPromptCapabilities(true),
 	)
@@ -39,14 +39,10 @@ func (s *Service) initMCPServer() {
 	s.mcpServer.AddTool(CurrentTimeTool, s.handleMCPCurrentTime)
 	s.mcpServer.AddTool(GetMediaContentTool, s.handleMCPGetMediaContent)
 	s.mcpServer.AddTool(OCRImageMessageTool, s.handleMCPOCRImageMessage)
-	s.mcpServer.AddTool(SubscribeNewMessagesTool, s.handleMCPSubscribeNewMessages)
-	s.mcpServer.AddTool(UnsubscribeNewMessagesTool, s.handleMCPUnsubscribeNewMessages)
-	s.mcpServer.AddTool(GetActiveSubscriptionsTool, s.handleMCPGetActiveSubscriptions)
 	s.mcpServer.AddTool(SendWebhookNotificationTool, s.handleMCPSendWebhookNotification)
 	s.mcpServer.AddTool(AnalyzeChatActivityTool, s.handleMCPAnalyzeChatActivity)
 	s.mcpServer.AddTool(GetUserProfileTool, s.handleMCPGetUserProfile)
 	s.mcpServer.AddTool(SearchSharedFilesTool, s.handleMCPSearchSharedFiles)
-	s.mcpServer.AddResourceTemplate(ChatLogRealtimeResource, s.handleMCPRealtimeResource)
 	s.mcpServer.AddPrompt(ChatSummaryDailyPrompt, s.handleMCPChatSummaryDaily)
 	s.mcpServer.AddPrompt(ConflictDetectorPrompt, s.handleMCPConflictDetector)
 	s.mcpServer.AddPrompt(RelationshipMilestonesPrompt, s.handleMCPRelationshipMilestones)
@@ -55,8 +51,6 @@ func (s *Service) initMCPServer() {
 		server.WithMessageEndpoint("/message"),
 	)
 	s.mcpStreamableServer = server.NewStreamableHTTPServer(s.mcpServer)
-
-	go s.startMCPMessageMonitor()
 }
 
 var ChatSummaryDailyPrompt = mcp.NewPrompt(
@@ -85,13 +79,6 @@ var SearchSharedFilesTool = mcp.NewTool(
 	mcp.WithString("keyword", mcp.Description("文件名搜索关键词")),
 )
 
-var ChatLogRealtimeResource = mcp.NewResourceTemplate(
-	"chatlog://realtime/{talker}",
-	"实时消息流",
-	mcp.WithTemplateDescription("特定对话方的实时消息更新流。当收到资源更新通知时，读取此资源以获取最新消息。"),
-	mcp.WithTemplateMIMEType("text/plain"),
-)
-
 var AnalyzeChatActivityTool = mcp.NewTool(
 	"analyze_chat_activity",
 	mcp.WithDescription(`统计特定时间段内对话方的活跃度，包括发言频率、活跃时段等。用于分析某人的社交习惯或群聊热度。`),
@@ -103,24 +90,6 @@ var GetUserProfileTool = mcp.NewTool(
 	"get_user_profile",
 	mcp.WithDescription(`获取联系人或群组的详细资料，包括备注、属性、群成员（如果是群组）等背景信息。用于更深入地了解对话方。`),
 	mcp.WithString("key", mcp.Description("联系人或群组的 ID 或名称"), mcp.Required()),
-)
-
-var SubscribeNewMessagesTool = mcp.NewTool(
-	"subscribe_new_messages",
-	mcp.WithDescription(`订阅特定联系人或群组的实时消息。订阅后，系统将监控新消息并在发现新消息时向指定的 Webhook 地址推送。建议在需要实时跟进对话时使用。`),
-	mcp.WithString("talker", mcp.Description("要订阅的对话方 ID（联系人或群组）"), mcp.Required()),
-	mcp.WithString("webhook_url", mcp.Description("推送新消息通知的 Webhook 地址"), mcp.Required()),
-)
-
-var UnsubscribeNewMessagesTool = mcp.NewTool(
-	"unsubscribe_new_messages",
-	mcp.WithDescription(`取消订阅特定联系人或群组的实时消息。取消后，将不再收到该对话方的新消息通知。`),
-	mcp.WithString("talker", mcp.Description("要取消订阅的对话方 ID（联系人或群组）"), mcp.Required()),
-)
-
-var GetActiveSubscriptionsTool = mcp.NewTool(
-	"get_active_subscriptions",
-	mcp.WithDescription(`获取当前正在订阅的活跃实时消息流列表。用于查看当前监控了哪些联系人或群组，方便管理或取消订阅。`),
 )
 
 var SendWebhookNotificationTool = mcp.NewTool(
@@ -633,97 +602,6 @@ func (s *Service) handleMCPGetVoice(ctx context.Context, msg *model.Message) (*m
 	}, nil
 }
 
-type SubscribeNewMessagesRequest struct {
-	Talker     string `json:"talker"`
-	WebhookURL string `json:"webhook_url"`
-}
-
-func (s *Service) handleMCPSubscribeNewMessages(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	var req SubscribeNewMessagesRequest
-	if err := request.BindArguments(&req); err != nil {
-		return errors.ErrMCPTool(err), nil
-	}
-
-	if req.Talker == "" || req.WebhookURL == "" {
-		return errors.ErrMCPTool(fmt.Errorf("talker and webhook_url are required")), nil
-	}
-
-	// 初始化订阅
-	s.mcpSubMu.Lock()
-	s.mcpSubscriptions[req.Talker] = &Subscription{
-		Talker:     req.Talker,
-		WebhookURL: req.WebhookURL,
-		LastTime:   time.Now(),
-	}
-	s.mcpSubMu.Unlock()
-	s.saveSubscriptions()
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.TextContent{
-				Type: "text",
-				Text: fmt.Sprintf("已成功订阅 %s 的实时消息。推送地址: %s", req.Talker, req.WebhookURL),
-			},
-		},
-	}, nil
-}
-
-func (s *Service) handleMCPUnsubscribeNewMessages(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	var req SubscribeNewMessagesRequest
-	if err := request.BindArguments(&req); err != nil {
-		return errors.ErrMCPTool(err), nil
-	}
-
-	if req.Talker == "" {
-		return errors.ErrMCPTool(fmt.Errorf("talker is required")), nil
-	}
-
-	// 删除订阅
-	s.mcpSubMu.Lock()
-	delete(s.mcpSubscriptions, req.Talker)
-	s.mcpSubMu.Unlock()
-	s.saveSubscriptions()
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.TextContent{
-				Type: "text",
-				Text: fmt.Sprintf("已成功取消订阅 %s 的实时消息。", req.Talker),
-			},
-		},
-	}, nil
-}
-
-func (s *Service) handleMCPGetActiveSubscriptions(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	s.mcpSubMu.RLock()
-	defer s.mcpSubMu.RUnlock()
-	if len(s.mcpSubscriptions) == 0 {
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				mcp.TextContent{
-					Type: "text",
-					Text: "当前没有活跃的订阅。",
-				},
-			},
-		}, nil
-	}
-
-	buf := &bytes.Buffer{}
-	buf.WriteString("当前活跃订阅列表:\n")
-	for talker, sub := range s.mcpSubscriptions {
-		buf.WriteString(fmt.Sprintf("- %s (Webhook: %s)\n", talker, sub.WebhookURL))
-	}
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.TextContent{
-				Type: "text",
-				Text: buf.String(),
-			},
-		},
-	}, nil
-}
-
 type SendWebhookNotificationRequest struct {
 	URL     string `json:"url"`
 	Message string `json:"message"`
@@ -1017,128 +895,4 @@ func (s *Service) handleMCPRelationshipMilestones(ctx context.Context, request m
 	), nil
 }
 
-func (s *Service) handleMCPRealtimeResource(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	uri := request.Params.URI
-	talker := ""
 
-	// 尝试从路径解析 chatlog://realtime/{talker}
-	if strings.HasPrefix(uri, "chatlog://realtime/") {
-		talker = strings.TrimPrefix(uri, "chatlog://realtime/")
-	}
-
-	if talker == "" {
-		return nil, fmt.Errorf("talker not found in URI: %s", uri)
-	}
-
-	// 获取最近消息，取较多数量以确保能涵盖最新动态，然后截取最后 10 条
-	now := time.Now()
-	start := now.Add(-10 * time.Minute)
-	messages, err := s.db.GetMessages(start, now, talker, "", "", 100, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(messages) > 10 {
-		messages = messages[len(messages)-10:]
-	}
-
-	buf := &bytes.Buffer{}
-	if len(messages) == 0 {
-		buf.WriteString("目前没有新消息")
-	} else {
-		for _, m := range messages {
-			buf.WriteString(m.PlainText(false, "15:04:05", ""))
-			buf.WriteString("\n")
-		}
-	}
-
-	return []mcp.ResourceContents{
-		mcp.TextResourceContents{
-			URI:      uri,
-			MIMEType: "text/plain",
-			Text:     buf.String(),
-		},
-	}, nil
-}
-
-func (s *Service) startMCPMessageMonitor() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.mcpSubMu.RLock()
-			// 创建副本以减少锁持有时间
-			subscriptions := make([]*Subscription, 0, len(s.mcpSubscriptions))
-			for _, sub := range s.mcpSubscriptions {
-				subscriptions = append(subscriptions, &Subscription{
-					Talker:     sub.Talker,
-					WebhookURL: sub.WebhookURL,
-					LastTime:   sub.LastTime,
-					LastStatus: sub.LastStatus,
-					LastError:  sub.LastError,
-				})
-			}
-			s.mcpSubMu.RUnlock()
-
-			for _, sub := range subscriptions {
-				now := time.Now()
-				messages, err := s.db.GetMessages(sub.LastTime, now, sub.Talker, "", "", 10, 0)
-				if err != nil {
-					log.Error().Err(err).Str("talker", sub.Talker).Msg("Monitor failed to get messages")
-					continue
-				}
-
-				if len(messages) > 0 {
-					// 准备推送内容
-					buf := &bytes.Buffer{}
-					for _, m := range messages {
-						buf.WriteString(m.PlainText(false, "15:04:05", ""))
-						buf.WriteString("\n")
-					}
-
-					payload := map[string]interface{}{
-						"message":   buf.String(),
-						"talker":    sub.Talker,
-						"timestamp": time.Now().Format(time.RFC3339),
-						"source":    "chatlog-monitor",
-					}
-
-					body, _ := json.Marshal(payload)
-					go func(talker, url string, data []byte) {
-						httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
-						if err != nil {
-							s.updateSubscriptionStatus(talker, "Error", err.Error())
-							return
-						}
-						httpReq.Header.Set("Content-Type", "application/json")
-						client := &http.Client{Timeout: 10 * time.Second}
-						resp, err := client.Do(httpReq)
-						if err != nil {
-							s.updateSubscriptionStatus(talker, "Failed", err.Error())
-							return
-						}
-						defer resp.Body.Close()
-						if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-							s.updateSubscriptionStatus(talker, "Failed", fmt.Sprintf("Status %d", resp.StatusCode))
-						} else {
-							s.updateSubscriptionStatus(talker, "Success", "")
-						}
-					}(sub.Talker, sub.WebhookURL, body)
-
-					// 更新最后一次检查的时间为最新消息的时间 + 1秒
-					s.mcpSubMu.Lock()
-					if currentSub, ok := s.mcpSubscriptions[sub.Talker]; ok {
-						currentSub.LastTime = messages[len(messages)-1].Time.Add(time.Second)
-					}
-					s.lastPushTime = time.Now()
-					s.lastPushTalker = sub.Talker
-					s.mcpSubMu.Unlock()
-
-					log.Info().Str("talker", sub.Talker).Int("count", len(messages)).Str("webhook", sub.WebhookURL).Msg("Sent Webhook push notification")
-				}
-			}
-		}
-	}
-}

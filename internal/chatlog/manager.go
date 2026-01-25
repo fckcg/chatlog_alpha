@@ -420,19 +420,7 @@ func (m *Manager) GetLatestSession() (*model.Session, error) {
 	return nil, nil
 }
 
-func (m *Manager) GetMCPSubscriptions() []*http.Subscription {
-	if m.http == nil {
-		return nil
-	}
-	return m.http.GetMCPSubscriptions()
-}
 
-func (m *Manager) GetMCPStatus() (time.Time, string) {
-	if m.http == nil {
-		return time.Time{}, ""
-	}
-	return m.http.GetMCPStatus()
-}
 
 func (m *Manager) CommandKey(configPath string, pid int, force bool, showXorKey bool) (string, error) {
 

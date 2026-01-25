@@ -611,14 +611,14 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 
 	if key != "" {
 		// 按照关键字查询
-		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name 
+		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name, last_msg_type, last_msg_sub_type 
 				FROM SessionTable 
 				WHERE username = ? OR last_sender_display_name = ?
 				ORDER BY sort_timestamp DESC`
 		args = []interface{}{key, key}
 	} else {
 		// 查询所有会话
-		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name 
+		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name, last_msg_type, last_msg_sub_type 
 				FROM SessionTable 
 				ORDER BY sort_timestamp DESC`
 	}
@@ -651,6 +651,8 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 			&sessionV4.LastTimestamp,
 			&sessionV4.LastMsgSender,
 			&sessionV4.LastSenderDisplayName,
+			&sessionV4.LastMsgType,
+			&sessionV4.LastMsgSubType,
 		)
 
 		if err != nil {
